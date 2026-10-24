@@ -1,61 +1,75 @@
 ---
 name: vibe-clean
-description: Safe, cross-platform system hygiene and zombie process killer for AI coding agents (Claude Code, Cursor, Codex, Antigravity, Aider). Cleans orphaned RAM processes, forgotten Git worktrees, stale logs, and audits scripts for unsafe subcommands.
+description: Mantém a ordem, a saúde e a higiene do sistema no Vibe Coding, eliminando processos zumbis na memória RAM, portas presas, mesas Git órfãs no SSD, poluição de sessões e scripts desprotegidos no Windows/Linux/Mac.
 category: devops
 ---
 
-# Vibe-Clean: Safe System Hygiene & Zombie Process Killer for AI Coding
+# Vibe-Clean: Guardião da Ordem, Higiene do Sistema e Prevenção de Zumbis
 
-`vibe-clean` protects your local operating system (Windows, macOS, Linux) from background resource leaks caused by autonomous AI coding agents (Claude Code, Cursor, Codex, Antigravity, Aider).
+O Gabriel utiliza a abordagem de **100% Vibe Coding** (programação guiada por intenção, delegada para a IA). Ele não é desenvolvedor e não deve carregar a carga cognitiva de caçar PIDs, monitorar memória RAM vazando, destravar portas locais presas ou limpar lixo no SSD.
 
-AI agents frequently spawn background dev servers, watchers, compilers, or child scripts that never terminate when conversations close, resulting in 90%+ RAM usage, noisy fans, and gigabytes of wasted SSD storage.
-
----
-
-## 1. Core Capabilities (The 5 Pillars)
-
-1. **RAM & Zombie Hunter (`zumbis`):** Surgically detects and terminates orphaned AI child processes (`node`, `python`, `whisper`, `ffmpeg`) while strictly protecting your active IDE and web browsers.
-2. **Disk & Worktree Health (`auditar`):** Audits forgotten Git worktrees, reporting storage consumption and stale branches.
-3. **Session & Cache Cleaner (`limpar`):** Moves headless session logs, lock files, and stale AI artifacts (> 5 days) to a reversible quarantine directory with 1-click rollback.
-4. **Permanent SSD Space Recovery (`expurgar`):** Safely purges quarantined storage to permanently reclaim SSD space.
-5. **Toxic Script Auditor (Static Hygiene):** Scans repository automation scripts for hazardous anti-patterns:
-   * Subprocesses missing a `timeout` argument (which lead to eternal zombie locks on network/I/O drops).
-   * Unsafe flags like `--new-project` in Antigravity CLI that bloat the IDE sidebar.
+Enquanto a skill irmã `vibe-dev` cuida da integridade do **código** (mesas Git isoladas), a skill **`vibe-clean`** cuida da integridade do **sistema operacional** (impede que o desleixo de agentes de IA transforme o computador em um depósito de processos zumbis, portas travadas e arquivos mortos).
 
 ---
 
-## 2. Canonical Usage
+## 1. Os 6 Pilares do Vibe-Clean
 
-Run from the root of any project or repository:
+| Pilar | O que a IA costuma abandonar | O que o Vibe-Clean faz |
+|---|---|---|
+| **1. Memória RAM** | Processos zumbis (`node.exe`, `python.exe`, `whisper`, `ffmpeg`) que continuam rodando após tarefas | Localiza e encerra cirurgicamente apenas os zumbis, protegendo a IDE e servidores MCP ativos |
+| **2. Portas de Dev** | Servidores locais presos nas portas `3000`, `5173`, `8000`, `9222` impedindo novos testes | Caçador de portas cirúrgico: protege o navegador visual do usuário e libera portas travadas em 1 comando |
+| **3. Disco (SSD)** | Mesas de trabalho Git (`.worktrees/`) esquecidas que acumulam gigabytes | Audita e desmonta com segurança mesas concluídas com 0 commits pendentes (`--limpar-concluidas`) |
+| **4. Sessões de IA** | Arquivos `.lock`, logs headless e sessões antigas | **100% Node.js hermético**: move arquivos órfãos com mais de 5 dias para quarentena reversível com manifesto |
+| **5. Barra Lateral** | Centenas de projetos fantasmas repetidos poluem a interface da IDE | Mantém a trava `--project default-cli-project` e isola arquivos de projetos fantasmas automaticamente |
+| **6. Higiene de Scripts** | Subprocessos sem timeout ou comandos perigosos criados por agentes | Auditor estático que aponta scripts com risco de gerar zumbis eternos ou inchaço |
 
-### 1. Transparent System X-Ray (Read-Only)
+---
+
+## 2. Comandos Canônicos do Sistema
+
+Todos os comandos rodam a partir da raiz do workspace:
+
+### 1. Raio-X do Sistema (`auditar`)
+Diagnóstico completo e seguro em menos de 3 segundos, sem alterar nenhum arquivo:
 ```bash
 node scripts/vibe-clean.mjs auditar
 ```
+*(Nota: `node scripts/faxina.mjs auditar` também funciona como alias transparente).*
 
-### 2. Immediate RAM Recovery
+### 2. Caçador de Portas Presas (`portas`)
+Inspeciona ou libera as portas de desenvolvimento (3000, 5173, 8000, 9222):
+```bash
+node scripts/vibe-clean.mjs portas [--liberar]
+```
+
+### 3. Liberação Imediata de Memória RAM (`zumbis`)
+Mata processos zumbis de IA que ficaram pendurados:
 ```bash
 node scripts/vibe-clean.mjs zumbis --confirmar
 ```
 
-### 3. Safe Cleanup with Reversible Quarantine
+### 4. Gestão e Desmontagem Rápida de Mesas Git (`mesas`)
+Audita ou desmonta mesas concluídas e limpas (0 commits pendentes):
+```bash
+node scripts/vibe-clean.mjs mesas [--limpar-concluidas]
+```
+
+### 5. Faxina Geral Segura 100% Node.js (`limpar`)
+Executa a higienização completa com proteção de quarentena reversível e manifesto transacional:
 ```bash
 node scripts/vibe-clean.mjs limpar [--dias 5]
 ```
 
-### 4. Permanent SSD Purge
+### 6. Expurgo Definitivo de Espaço (`expurgar`)
+Exclui a pasta de quarentena e devolve gigabytes para o SSD:
 ```bash
 node scripts/vibe-clean.mjs expurgar --confirmar-destruicao
 ```
 
 ---
 
-## 3. Recommended Companions (100% Optional)
+## 3. Sinergia de Ecossistema (100% Opcional)
 
-`vibe-clean` is **100% standalone and has zero dependencies**. 
-
-If you also want collision-free Git worktree governance and snapshot-driven safety for multi-agent pair programming, check out our companion skill:
-👉 [**vibe-dev**](https://github.com/Gabrielrtads/vibe-dev)
-
----
-⭐ **Enjoying vibe-clean?** Leave a star on [GitHub](https://github.com/Gabrielrtads/vibe-clean) to support the open-source agent ecosystem!
+* **Código & Git:** [`vibe-dev`](https://github.com/Gabrielrtads/vibe-dev) (Governança de mesas Git)
+* **Sistema & RAM:** [`vibe-clean`](https://github.com/Gabrielrtads/vibe-clean) (Higiene do sistema operacional)
+*(Cada ferramenta é 100% independente e não exige a instalação da outra).*
