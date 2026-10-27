@@ -1,14 +1,22 @@
 # 🧹 Vibe-Clean
 
+> **The OS Hygiene & Zombie Process Killer for AI Coding Agents.**  
+> *(Eliminates lingering RAM zombies, frees stuck dev ports, and prunes orphaned worktrees across Windows, macOS & Linux).*
+
+[![skills.sh compatible](https://img.shields.io/badge/skills.sh-vibe--clean-6366f1?style=for-the-badge)](https://skills.sh)
+[![Zero-Dependency](https://img.shields.io/badge/Dependencies-Zero-emerald?style=for-the-badge)](#)
+[![Cross-Platform](https://img.shields.io/badge/OS-Windows_|_macOS_|_Linux-blue?style=for-the-badge)](#)
+[![Vibe Coding Ready](https://img.shields.io/badge/Vibe_Coding-100%25_Friendly-ff007f?style=for-the-badge)](#)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/Gabrielrtads/vibe-clean?style=social)](https://github.com/Gabrielrtads/vibe-clean/stargazers)
 
-> ⭐ **If this tool saved you time or empowered your AI agents, please star this repository! It helps more developers discover the project.**
+```bash
+# ⚡ 1-Click Install via skills.sh (Claude Code / Codex / Antigravity):
+npx skills add Gabrielrtads/vibe-clean
 
-> **Safe, Cross-Platform System Hygiene & Zombie Process Killer for AI Coding Agents**  
-> *Built for Claude Code, Cursor, OpenAI Codex, Antigravity, and Aider.*
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![skills.sh](https://img.shields.io/badge/skills.sh-vibe--clean-ff69b4.svg)](https://skills.sh)
+# Or audit system health immediately without touching any files:
+node scripts/vibe-clean.mjs auditar
+```
 
 ---
 
@@ -23,16 +31,6 @@ However, when you close a chat session or switch tasks, **those child processes 
 * Your SSD loses 20+ GB to forgotten git worktrees and temporary build artifacts.
 
 **`vibe-clean` is the automated antidote:** a zero-dependency, 100% pure Node.js system hygiene engine that reclaims your machine's speed without closing your browser tabs, killing active agents, or terminating your IDE.
-
----
-
-## ⚡ 1-Click Install via `skills.sh`
-
-Add directly to your AI agent of choice:
-
-```bash
-npx skills add Gabrielrtads/vibe-clean
-```
 
 ---
 
@@ -99,9 +97,21 @@ If you also need safe, collision-free Git worktree lifecycle management for pair
 
 ---
 
-## 📄 License
+---
 
-MIT © [Gabriel Toledo](https://github.com/Gabrielrtads)
+<div align="center">
+
+### ⭐ Impressed with Vibe-Clean?
+If this tool rescued your RAM or freed your stuck dev ports, please star the repository!  
+It helps other autonomous agent developers discover the project.
+
+[![Star on GitHub](https://img.shields.io/github/stars/Gabrielrtads/vibe-clean?style=social)](https://github.com/Gabrielrtads/vibe-clean/stargazers)
 
 ---
-⭐ **If this tool saved your RAM, consider giving it a star on [GitHub](https://github.com/Gabrielrtads/vibe-clean)!**
+
+**Built with pride by [Gabriel Toledo (@Gabrielrtads)](https://github.com/Gabrielrtads)**  
+*Creator of [Barber.fi](https://painel.barberfi.com.br), `vibe-design-studio`, `sta`, `kage-bunshin`, and `agent-log`.*
+
+Licensed under [MIT](LICENSE).
+
+</div>

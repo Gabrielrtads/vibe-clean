@@ -1,7 +1,9 @@
 ---
 name: vibe-clean
-description: Mantém a ordem, a saúde e a higiene do sistema no Vibe Coding, eliminando processos zumbis na memória RAM, portas presas, mesas Git órfãs no SSD, poluição de sessões e scripts desprotegidos no Windows/Linux/Mac.
+version: 1.1.0
 category: devops
+description: "The OS hygiene & zombie process killer for Vibe-Coders. Eliminates zombie processes (node, python, ffmpeg) eating RAM, frees stuck dev ports (3000, 5173, 8000), prunes orphaned Git worktrees, and cleans disk junk. / Guardião da ordem e faxina do sistema operacional no Vibe Coding. Trigger with /vibe-clean, /faxina, 'limpar zumbis', 'liberar portas', 'kill zombies', 'free ports', or 'clean worktrees'."
+tags: [vibe-clean, vibe-coding, zombie-processes, memory-cleaner, port-killer, git-worktrees, disk-cleanup, devops, system-hygiene, claude-code, codex, antigravity]
 ---
 
 # Vibe-Clean: Guardião da Ordem, Higiene do Sistema e Prevenção de Zumbis
