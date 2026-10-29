@@ -9,7 +9,7 @@
  *   node scripts/vibe-clean.mjs zumbis [--confirmar]           (Lista ou encerra processos órfãos na RAM)
  *   node scripts/vibe-clean.mjs portas [--liberar]             (Inspeciona ou libera portas 3000, 5173, 8000, 9222)
  *   node scripts/vibe-clean.mjs mesas [--limpar-concluidas]    (Audita ou desmonta com segurança mesas sem commits)
- *   node scripts/vibe-clean.mjs limpar [--dias 5]              (Executa faxina segura 100% Node.js com quarentena)
+ *   node scripts/vibe-clean.mjs limpar [--dias 5] [--confirmar] (Dry-run da faxina; com --confirmar move para quarentena)
  *   node scripts/vibe-clean.mjs expurgar --confirmar-destruicao (Exclui quarentenas antigas para liberar SSD)
  * 
  * Repo: https://github.com/Gabrielrtads/vibe-clean
@@ -430,7 +430,7 @@ function auditar() {
     try {
       const files = fs.readdirSync(PROJECTS_CONFIG_DIR).filter(f => f.endsWith(".json"));
       projectFilesCount = files.length;
-      ghostProjectsCount = files.filter(f => !PROTECTED_PROJECT_FILES.has(f)).length;
+      ghostProjectsCount = listarProjetosOrfaos(PROJECTS_CONFIG_DIR).length;
     } catch {}
   }
 
@@ -471,7 +471,7 @@ function auditar() {
   console.log("\n-------------------------------------------------------");
   console.log(`Dica: Para gerenciar portas presas: node scripts/vibe-clean.mjs portas --liberar`);
   console.log(`Para desmontar mesas concluidas   : node scripts/vibe-clean.mjs mesas --limpar-concluidas`);
-  console.log(`Para faxina segura de sessoes     : node scripts/vibe-clean.mjs limpar`);
+  console.log(`Para faxina segura de sessoes     : node scripts/vibe-clean.mjs limpar  (dry-run; aplicar com --confirmar)`);
   console.log(`⭐ Repositório oficial: https://github.com/Gabrielrtads/vibe-clean`);
   console.log("=======================================================\n");
 }
@@ -706,7 +706,7 @@ function gerenciarMesas(limparConcluidas = false) {
  * HERMETISMO 100% NODE.JS: Quarentena de Sessões da CLI
  * Substitui scripts Python externos com manifesto e suporte total a rollback.
  */
-function quarentenaSessoesCliNode(dias = 5) {
+function quarentenaSessoesCliNode(dias = 5, confirmar = false) {
   if (!fs.existsSync(CLI_DIR)) return "Diretório da CLI não encontrado.";
 
   const now = Date.now();
@@ -782,6 +782,10 @@ function quarentenaSessoesCliNode(dias = 5) {
     return "Nenhum arquivo órfão com mais de " + dias + " dias para quarentena.";
   }
 
+  if (!confirmar) {
+    return `[DRY-RUN] ${candidates.length} item(ns) com mais de ${dias} dias seriam movidos para quarentena. Nada foi movido. Para mover, repita com --confirmar.`;
+  }
+
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const destDir = path.join(CLI_DIR, `quarentena_${ts}`);
   fs.mkdirSync(destDir, { recursive: true });
@@ -794,6 +798,7 @@ function quarentenaSessoesCliNode(dias = 5) {
   };
 
   let movedCount = 0;
+  const falhas = [];
   for (const c of candidates) {
     try {
       const catDestDir = path.join(destDir, c.category);
@@ -802,72 +807,164 @@ function quarentenaSessoesCliNode(dias = 5) {
       fs.renameSync(c.fullPath, targetPath);
       manifest.itens.push({ origem: c.fullPath, destino: targetPath, categoria: c.category });
       movedCount++;
-    } catch {}
+    } catch (err) {
+      falhas.push({ origem: c.fullPath, erro: err.message });
+    }
   }
+  manifest.falhas = falhas;
 
   fs.writeFileSync(path.join(destDir, "manifesto.json"), JSON.stringify(manifest, null, 2), "utf8");
-  return `Movidos ${movedCount} itens para quarentena reversível em ${destDir}`;
+  const falhasMsg = falhas.map(f => `\n  [ERRO] Nao foi possivel mover ${f.origem}: ${f.erro}`).join("");
+  return `Movidos ${movedCount} de ${candidates.length} itens para quarentena reversível em ${destDir}${falhasMsg}`;
+}
+
+/**
+ * Coleta as pastas do disco referenciadas por um arquivo de projeto da IDE
+ * (ex.: projectResources.resources[].gitFolder.folderUri = "file:///c%3A/...").
+ */
+export function extrairCaminhosProjeto(json) {
+  const caminhos = [];
+  (function walk(o) {
+    if (!o || typeof o !== "object") return;
+    for (const [k, v] of Object.entries(o)) {
+      if (typeof v === "string" && /uri$/i.test(k) && v.startsWith("file://")) {
+        try {
+          caminhos.push(fileURLToPath(v));
+        } catch {
+          caminhos.push(null); // URI ilegível: impossível provar ausência
+        }
+      } else if (v && typeof v === "object") {
+        walk(v);
+      }
+    }
+  })(json);
+  return caminhos;
+}
+
+// "existe" | "ausente" | "indeterminado" — só ENOENT com a raiz (drive) presente prova ausência
+function estadoCaminho(p) {
+  if (!p) return "indeterminado";
+  if (!IS_WINDOWS && /^\/[a-zA-Z]:/.test(p)) return "indeterminado"; // caminho Windows lido fora do Windows
+  try {
+    fs.statSync(p);
+    return "existe";
+  } catch (err) {
+    if (err.code !== "ENOENT" && err.code !== "ENOTDIR") return "indeterminado";
+    try {
+      fs.statSync(path.parse(p).root);
+    } catch {
+      return "indeterminado"; // drive externo/rede desconectado não é prova de órfão
+    }
+    return "ausente";
+  }
+}
+
+/**
+ * Um projeto só é órfão se referencia ao menos uma pasta e TODAS comprovadamente não existem mais.
+ * Na dúvida (JSON ilegível, sem caminho, drive ausente) o projeto é mantido.
+ */
+export function avaliarProjeto(filePath) {
+  const arquivo = path.basename(filePath);
+  if (PROTECTED_PROJECT_FILES.has(arquivo)) return { arquivo, orfao: false, motivo: "protegido" };
+
+  let json;
+  try {
+    json = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (err) {
+    return { arquivo, orfao: false, motivo: `JSON ilegivel, mantido (${err.message})` };
+  }
+
+  const caminhos = extrairCaminhosProjeto(json);
+  if (caminhos.length === 0) return { arquivo, orfao: false, motivo: "nao referencia pasta no disco, mantido" };
+
+  const estados = caminhos.map(estadoCaminho);
+  if (estados.every(e => e === "ausente")) {
+    return { arquivo, orfao: true, motivo: `pasta(s) inexistente(s): ${caminhos.join(", ")}`, caminhos };
+  }
+  return { arquivo, orfao: false, motivo: estados.includes("existe") ? "pasta ainda existe" : "nao foi possivel verificar a pasta, mantido", caminhos };
+}
+
+export function listarProjetosOrfaos(projectsDir = PROJECTS_CONFIG_DIR) {
+  if (!fs.existsSync(projectsDir)) return [];
+  return fs.readdirSync(projectsDir)
+    .filter(f => f.endsWith(".json"))
+    .map(f => avaliarProjeto(path.join(projectsDir, f)))
+    .filter(r => r.orfao);
 }
 
 /**
  * HERMETISMO 100% NODE.JS: Quarentena de Projetos Fantasmas
+ * Sem `confirmar` é apenas um dry-run: lista, mas não move nada.
  */
-function quarentenaProjetosFantasmasNode() {
-  if (!fs.existsSync(PROJECTS_CONFIG_DIR)) return "Diretório de projetos não encontrado.";
+export function quarentenaProjetosFantasmasNode(confirmar = false, { projectsDir = PROJECTS_CONFIG_DIR, arquivoDir = ARQUIVO_DIR, rename = fs.renameSync } = {}) {
+  if (!fs.existsSync(projectsDir)) return { mensagem: "Diretório de projetos não encontrado.", movidos: 0, falhas: [] };
 
-  const ghostFiles = [];
+  let orfaos;
   try {
-    const files = fs.readdirSync(PROJECTS_CONFIG_DIR).filter(f => f.endsWith(".json"));
-    for (const f of files) {
-      if (!PROTECTED_PROJECT_FILES.has(f)) {
-        ghostFiles.push(f);
-      }
-    }
-  } catch {}
+    orfaos = listarProjetosOrfaos(projectsDir);
+  } catch (err) {
+    return { mensagem: `[ERRO] Nao foi possivel ler ${projectsDir}: ${err.message}. Nada foi movido.`, movidos: 0, falhas: [] };
+  }
 
-  if (ghostFiles.length === 0) {
-    return "Nenhum projeto fantasma detectado para isolar.";
+  if (orfaos.length === 0) {
+    return { mensagem: "Nenhum projeto fantasma (pasta inexistente no disco) detectado para isolar.", movidos: 0, falhas: [] };
+  }
+
+  const lista = orfaos.map(o => `\n    * ${o.arquivo} -> ${o.motivo}`).join("");
+  if (!confirmar) {
+    return {
+      mensagem: `[DRY-RUN] ${orfaos.length} projeto(s) orfao(s) seriam isolados:${lista}\n  Nada foi movido. Para mover, repita com --confirmar.`,
+      movidos: 0,
+      falhas: []
+    };
   }
 
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
-  const destDir = path.join(ARQUIVO_DIR, `quarentena_projetos_config_${ts}`);
+  const destDir = path.join(arquivoDir, `quarentena_projetos_config_${ts}`);
   fs.mkdirSync(destDir, { recursive: true });
 
   const manifest = {
     timestamp: ts,
-    total: ghostFiles.length,
-    arquivos: []
+    total: orfaos.length,
+    arquivos: [],
+    falhas: []
   };
 
   let moved = 0;
-  for (const f of ghostFiles) {
+  for (const o of orfaos) {
+    const src = path.join(projectsDir, o.arquivo);
+    const dst = path.join(destDir, o.arquivo);
     try {
-      const src = path.join(PROJECTS_CONFIG_DIR, f);
-      const dst = path.join(destDir, f);
-      fs.renameSync(src, dst);
-      manifest.arquivos.push({ origem: src, destino: dst });
+      rename(src, dst);
+      manifest.arquivos.push({ origem: src, destino: dst, motivo: o.motivo });
       moved++;
-    } catch {}
+    } catch (err) {
+      manifest.falhas.push({ origem: src, erro: err.message });
+    }
   }
 
   fs.writeFileSync(path.join(destDir, "manifesto.json"), JSON.stringify(manifest, null, 2), "utf8");
-  return `Isolados ${moved} projetos fantasmas para ${destDir}`;
+  const falhasMsg = manifest.falhas.map(f => `\n  [ERRO] Nao foi possivel mover ${f.origem}: ${f.erro}`).join("");
+  return { mensagem: `Isolados ${moved} de ${orfaos.length} projetos fantasmas para ${destDir}${falhasMsg}`, movidos: moved, falhas: manifest.falhas };
 }
 
-function limpar(dias = 5) {
+function limpar(dias = 5, confirmar = false) {
   console.log("\n=======================================================");
   console.log("             INICIANDO FAXINA SEGURA (100% NODE.JS)    ");
   console.log("=======================================================");
+  if (!confirmar) {
+    console.log("\n[DRY-RUN] Nada sera movido. Revise a lista e repita com --confirmar para aplicar.");
+  }
 
   // 1. Quarentena segura de sessões CLI (100% Node.js)
   console.log(`\n[Passo 1/3] Movendo sessoes antigas (> ${dias} dias) para quarentena reversivel...`);
-  const resSessoes = quarentenaSessoesCliNode(dias);
+  const resSessoes = quarentenaSessoesCliNode(dias, confirmar);
   console.log(`  ${resSessoes}`);
 
   // 2. Quarentena de projetos fantasmas (100% Node.js)
   console.log(`\n[Passo 2/3] Verificando e isolando projetos fantasmas em ~/.gemini/config/projects...`);
-  const resProjetos = quarentenaProjetosFantasmasNode();
-  console.log(`  ${resProjetos}`);
+  const resProjetos = quarentenaProjetosFantasmasNode(confirmar);
+  console.log(`  ${resProjetos.mensagem}`);
 
   // 3. Alerta de mesas Git
   const mesas = listarMesasGit();
@@ -953,7 +1050,7 @@ function main() {
       gerenciarMesas(limparConcluidas);
       break;
     case "limpar":
-      limpar(dias);
+      limpar(dias, confirmar);
       break;
     case "expurgar":
       expurgar(confirmarDestruicao);
