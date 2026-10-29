@@ -9,7 +9,7 @@
  *   node scripts/vibe-clean.mjs zumbis [--confirmar]           (Lista ou encerra processos órfãos na RAM)
  *   node scripts/vibe-clean.mjs portas [--liberar]             (Inspeciona ou libera portas 3000, 5173, 8000, 9222)
  *   node scripts/vibe-clean.mjs mesas [--limpar-concluidas]    (Audita ou desmonta com segurança mesas sem commits)
- *   node scripts/vibe-clean.mjs limpar [--dias 5]              (Executa faxina segura 100% Node.js com quarentena)
+ *   node scripts/vibe-clean.mjs limpar [--dias 5] [--confirmar] (Dry-run da faxina; com --confirmar move para quarentena)
  *   node scripts/vibe-clean.mjs expurgar --confirmar-destruicao (Exclui quarentenas antigas para liberar SSD)
  * 
  * Repo: https://github.com/Gabrielrtads/vibe-clean
@@ -19,7 +19,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { execFileSync, execSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const WORKTREES_DIR = path.join(ROOT_DIR, ".worktrees");
@@ -109,6 +109,25 @@ function findProcesses() {
 
   const psCmd = `Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, CommandLine, WorkingSetSize | ConvertTo-Json -Compress`;
   const all = execPwshJson(psCmd);
+  const { targets, zombies, protectedPids } = classificarProcessos(all, process.pid);
+
+  const zombieRamMB = Math.round(zombies.reduce((acc, p) => acc + (p.WorkingSetSize || 0), 0) / (1024 * 1024));
+
+  return {
+    totalTargetProcesses: targets.length,
+    protectedCount: protectedPids.size,
+    zombies,
+    zombieRamMB,
+    allProcesses: all
+  };
+}
+
+/**
+ * Classificação pura (testável) da tabela de processos do Windows.
+ * Um processo só é zumbi se o PID pai NÃO existe mais na tabela: nunca por
+ * conter uma palavra na linha de comando, pois isso mataria processos com pai vivo.
+ */
+export function classificarProcessos(all, selfPid) {
   const pidMap = new Map(all.map(p => [p.ProcessId, p]));
 
   // 1. Identificar PIDs raiz protegidos de TODOS os agentes e ferramentas do enxame:
@@ -127,6 +146,9 @@ function findProcesses() {
       name.includes("cursor") ||
       name.includes("code.exe") ||
       name.includes("windsurf") ||
+      name === "pwsh.exe" ||
+      name === "powershell.exe" ||
+      name === "wt.exe" ||
       cmd.includes("claude") ||
       cmd.includes("codex") ||
       cmd.includes("language_server")
@@ -152,7 +174,6 @@ function findProcesses() {
 
   for (const p of all) {
     const name = (p.Name || "").toLowerCase();
-    const cmd = (p.CommandLine || "").toLowerCase();
 
     const isTarget = name.includes("node.exe") || name.includes("python.exe") || name.includes("agy.exe") || name.includes("whisper") || name.includes("ffmpeg.exe");
     if (!isTarget) continue;
@@ -163,32 +184,15 @@ function findProcesses() {
     if (protectedPids.has(p.ProcessId)) continue;
 
     // Se for o próprio processo atual do Node, pula
-    if (p.ProcessId === process.pid) continue;
+    if (p.ProcessId === selfPid) continue;
 
-    // Critério de órfão: ParentProcessId não existe mais na tabela de processos ativos do SO
-    const parentExists = pidMap.has(p.ParentProcessId);
-    const isOrphan = !parentExists;
-
-    // Processos associados a scripts descartados de esteira
-    const isDeadScript = cmd.includes("fila_destilacao") || cmd.includes("clean_zombie") || cmd.includes("taskkill");
-
-    if (isOrphan || isDeadScript) {
-      zombies.push({
-        ...p,
-        motivo: isOrphan ? "Processo Pai Inexistente (Órfão)" : "Script de Esteira Finalizado"
-      });
+    // Único critério de órfão: ParentProcessId não existe mais na tabela de processos ativos do SO
+    if (!pidMap.has(p.ParentProcessId)) {
+      zombies.push({ ...p, motivo: "Processo Pai Inexistente (Órfão)" });
     }
   }
 
-  const zombieRamMB = Math.round(zombies.reduce((acc, p) => acc + (p.WorkingSetSize || 0), 0) / (1024 * 1024));
-
-  return {
-    totalTargetProcesses: targets.length,
-    protectedCount: protectedPids.size,
-    zombies,
-    zombieRamMB,
-    allProcesses: all
-  };
+  return { targets, zombies, protectedPids };
 }
 
 /**
@@ -212,26 +216,7 @@ function inspecionarPortas(allProcs = null) {
           portasStatus.push({ port, status: "LIVRE", pid: null, name: "-", cmd: "-", isZombie: false, isProtected: false });
         } else {
           for (const m of matches) {
-            const pInfo = pidMap.get(m.OwningProcess) || { Name: "desconhecido", CommandLine: "" };
-            const pName = (pInfo.Name || "").toLowerCase();
-            const pCmd = (pInfo.CommandLine || "").toLowerCase();
-
-            // Guardrail de Proteção: Navegadores visuais (Chrome, Brave, Edge) na 9222 NUNCA são zumbis
-            const isUserBrowser = pName.includes("brave") || pName.includes("chrome") || pName.includes("msedge");
-            const isCdpBrowser = port === 9222 && isUserBrowser;
-
-            // Zumbis típicos: node.exe ou python.exe esquecidos segurando a porta de dev
-            const isZombieDevServer = (pName.includes("node") || pName.includes("python")) && !pCmd.includes("language_server");
-
-            portasStatus.push({
-              port,
-              status: isCdpBrowser ? "OCUPADA (NAVEGADOR PRINCIPAL)" : (isZombieDevServer ? "OCUPADA (SERVIDOR PRESO)" : "OCUPADA"),
-              pid: m.OwningProcess,
-              name: pInfo.Name,
-              cmd: pInfo.CommandLine || "",
-              isZombie: isZombieDevServer,
-              isProtected: isCdpBrowser
-            });
+            portasStatus.push(classificarPorta(port, m.OwningProcess, pidMap));
           }
         }
       }
@@ -241,6 +226,47 @@ function inspecionarPortas(allProcs = null) {
   }
 
   return portasStatus;
+}
+
+/**
+ * Classificação pura (testável) de quem ocupa uma porta de dev.
+ * Só é "servidor preso" um node/python ÓRFÃO de verdade (PID pai inexistente):
+ * um servidor com pai vivo (terminal, npm, IDE) está em uso e nunca é marcado.
+ */
+export function classificarPorta(port, pid, pidMap) {
+  const pInfo = pidMap.get(pid);
+  const pName = ((pInfo && pInfo.Name) || "").toLowerCase();
+  const pCmd = ((pInfo && pInfo.CommandLine) || "").toLowerCase();
+
+  // Guardrail de Proteção: Navegadores visuais (Chrome, Brave, Edge) na 9222 NUNCA são zumbis
+  const isUserBrowser = pName.includes("brave") || pName.includes("chrome") || pName.includes("msedge");
+  const isCdpBrowser = port === 9222 && isUserBrowser;
+
+  // Zumbis típicos: node.exe ou python.exe esquecidos segurando a porta de dev, cujo pai já morreu
+  const isOrphan = !!pInfo && !pidMap.has(pInfo.ParentProcessId);
+  const isZombieDevServer = !isCdpBrowser && isOrphan && (pName.includes("node") || pName.includes("python")) && !pCmd.includes("language_server");
+
+  return {
+    port,
+    status: isCdpBrowser ? "OCUPADA (NAVEGADOR PRINCIPAL)" : (isZombieDevServer ? "OCUPADA (SERVIDOR PRESO)" : "OCUPADA"),
+    pid,
+    name: pInfo ? pInfo.Name : "desconhecido",
+    cmd: (pInfo && pInfo.CommandLine) || "",
+    isZombie: isZombieDevServer,
+    isProtected: isCdpBrowser
+  };
+}
+
+/**
+ * Decide quais portas presas podem ser liberadas. A 9222 (CDP) pode ser uma sessão
+ * de navegador/automação em uso: só entra com a confirmação extra --incluir-cdp.
+ */
+export function selecionarPortasParaLiberar(portas, incluirCdp = false) {
+  const presas = portas.filter(p => p.isZombie && !p.isProtected);
+  return {
+    liberar: presas.filter(p => p.port !== 9222 || incluirCdp),
+    cdpRetidas: presas.filter(p => p.port === 9222 && !incluirCdp)
+  };
 }
 
 function listarMesasGit() {
@@ -404,7 +430,7 @@ function auditar() {
     try {
       const files = fs.readdirSync(PROJECTS_CONFIG_DIR).filter(f => f.endsWith(".json"));
       projectFilesCount = files.length;
-      ghostProjectsCount = files.filter(f => !PROTECTED_PROJECT_FILES.has(f)).length;
+      ghostProjectsCount = listarProjetosOrfaos(PROJECTS_CONFIG_DIR).length;
     } catch {}
   }
 
@@ -445,7 +471,7 @@ function auditar() {
   console.log("\n-------------------------------------------------------");
   console.log(`Dica: Para gerenciar portas presas: node scripts/vibe-clean.mjs portas --liberar`);
   console.log(`Para desmontar mesas concluidas   : node scripts/vibe-clean.mjs mesas --limpar-concluidas`);
-  console.log(`Para faxina segura de sessoes     : node scripts/vibe-clean.mjs limpar`);
+  console.log(`Para faxina segura de sessoes     : node scripts/vibe-clean.mjs limpar  (dry-run; aplicar com --confirmar)`);
   console.log(`⭐ Repositório oficial: https://github.com/Gabrielrtads/vibe-clean`);
   console.log("=======================================================\n");
 }
@@ -485,7 +511,7 @@ function gerenciarZumbis(confirmar = false) {
   console.log(`SUCESSO: ${killed} processos finalizados. ~${procData.zombieRamMB} MB de RAM liberados!\n`);
 }
 
-function gerenciarPortas(liberar = false) {
+function gerenciarPortas(liberar = false, incluirCdp = false) {
   const portas = inspecionarPortas();
   console.log("\n=======================================================");
   console.log("       CAÇADOR DE PORTAS DE DEV (VIBE-CLEAN)           ");
@@ -493,6 +519,7 @@ function gerenciarPortas(liberar = false) {
 
   const presas = portas.filter(p => p.isZombie);
   const protegidas = portas.filter(p => p.isProtected);
+  const { liberar: liberaveis, cdpRetidas } = selecionarPortasParaLiberar(portas, incluirCdp);
 
   for (const p of portas) {
     if (p.status === "LIVRE") {
@@ -517,9 +544,14 @@ function gerenciarPortas(liberar = false) {
     return;
   }
 
-  console.log(`\nLiberando ${presas.length} porta(s) presas...`);
+  for (const p of cdpRetidas) {
+    console.log(`\n[AVISO] Porta :9222 (CDP, PID ${p.pid}) NAO sera liberada: pode ser uma sessao de navegador/automacao em uso.`);
+    console.log("Se tiver certeza, repita com a confirmacao extra: node scripts/vibe-clean.mjs portas --liberar --incluir-cdp");
+  }
+
+  console.log(`\nLiberando ${liberaveis.length} porta(s) presas...`);
   let freed = 0;
-  for (const p of presas) {
+  for (const p of liberaveis) {
     try {
       if (IS_WINDOWS) {
         execSync(`taskkill /F /PID ${p.pid}`, { stdio: "ignore" });
@@ -535,6 +567,75 @@ function gerenciarPortas(liberar = false) {
   console.log(`\nSUCESSO: ${freed} porta(s) liberadas!\n`);
 }
 
+function git(repoDir, gitArgs) {
+  return execFileSync("git", ["-C", repoDir, ...gitArgs], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+    timeout: 30000
+  }).trim();
+}
+
+function primeiraLinhaErro(err) {
+  const stderr = err && err.stderr ? String(err.stderr).trim() : "";
+  return (stderr || (err && err.message) || "erro desconhecido").split(/\r?\n/)[0];
+}
+
+/**
+ * Detecta a branch base real do repositório (origin/HEAD, senão origin/main, origin/master,
+ * main, master). Retorna null se nada existir: quem chama deve tratar como NÃO seguro.
+ */
+export function detectarBranchBase(repoDir) {
+  try {
+    const ref = git(repoDir, ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]);
+    if (ref) return ref.replace(/^refs\/remotes\//, "");
+  } catch {}
+  for (const candidata of ["origin/main", "origin/master", "main", "master"]) {
+    try {
+      git(repoDir, ["rev-parse", "--verify", "--quiet", `${candidata}^{commit}`]);
+      return candidata;
+    } catch {}
+  }
+  return null;
+}
+
+/**
+ * Avalia se uma mesa pode ser desmontada. Qualquer erro do git (status ou contagem de commits)
+ * vira `erro` e a mesa é NÃO segura: erro nunca é interpretado como "sem commits".
+ */
+export function analisarMesa(repoDir, mesa, base) {
+  const branch = mesa.branch;
+  const r = { isDirty: false, commitsAhead: null, erro: null, seguro: false };
+
+  try {
+    r.isDirty = git(mesa.caminho, ["status", "--porcelain"]).length > 0;
+  } catch (err) {
+    r.erro = `git status falhou: ${primeiraLinhaErro(err)}`;
+    return r;
+  }
+
+  if (!base) {
+    r.erro = "branch base desconhecida";
+    return r;
+  }
+  if (!branch) {
+    r.erro = "mesa sem branch (HEAD destacado)";
+    return r;
+  }
+
+  try {
+    const count = git(repoDir, ["rev-list", "--count", `${base}..refs/heads/${branch}`]);
+    if (!/^\d+$/.test(count)) throw new Error(`saida inesperada: '${count}'`);
+    r.commitsAhead = parseInt(count, 10);
+  } catch (err) {
+    r.erro = `contagem de commits vs ${base} falhou: ${primeiraLinhaErro(err)}`;
+    return r;
+  }
+
+  r.seguro = !r.isDirty && r.commitsAhead === 0 && branch.startsWith("task/");
+  return r;
+}
+
 function gerenciarMesas(limparConcluidas = false) {
   const mesas = listarMesasGit();
   console.log("\n=======================================================");
@@ -547,27 +648,25 @@ function gerenciarMesas(limparConcluidas = false) {
   }
 
   const concluidasLimpass = [];
+  const base = detectarBranchBase(ROOT_DIR);
+  if (!base) {
+    console.log("[AVISO] Nao foi possivel detectar a branch base do repositorio (origin/HEAD, main ou master).");
+    console.log("        Nenhuma mesa sera considerada segura para desmontar.");
+  } else {
+    console.log(`Branch base de comparacao: ${base}`);
+  }
 
   for (const m of mesas) {
     const nomePasta = path.basename(m.caminho);
     const branch = m.branch || "sem branch";
+    const analise = analisarMesa(ROOT_DIR, m, base);
 
-    // Verificar sujeira
-    let isDirty = false;
-    let commitsAhead = 0;
-    try {
-      const statusRaw = execFileSync("git", ["-C", m.caminho, "status", "--porcelain"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-      isDirty = statusRaw.length > 0;
-
-      // Verificar commits à frente de origin/main
-      const logRaw = execFileSync("git", ["-C", ROOT_DIR, "log", "origin/main.." + branch, "--oneline"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-      commitsAhead = logRaw ? logRaw.split(/\r?\n/).length : 0;
-    } catch {}
-
-    const statusMsg = isDirty ? "⚠️  ARQUIVOS NÃO SALVOS (SUJA)" : (commitsAhead > 0 ? `🔵 ${commitsAhead} COMMITS PENDENTES` : "🟢 PRONTA P/ DESMONTAR (0 COMMITS)");
+    const statusMsg = analise.erro
+      ? `❓ NÃO VERIFICÁVEL (${analise.erro}) -> tratada como NÃO segura`
+      : (analise.isDirty ? "⚠️  ARQUIVOS NÃO SALVOS (SUJA)" : (analise.commitsAhead > 0 ? `🔵 ${analise.commitsAhead} COMMITS PENDENTES` : "🟢 PRONTA P/ DESMONTAR (0 COMMITS)"));
     console.log(`  - ${nomePasta.padEnd(40)} | [${branch}] | ${statusMsg}`);
 
-    if (!isDirty && commitsAhead === 0 && branch.startsWith("task/")) {
+    if (analise.seguro) {
       concluidasLimpass.push(m);
     }
   }
@@ -607,7 +706,7 @@ function gerenciarMesas(limparConcluidas = false) {
  * HERMETISMO 100% NODE.JS: Quarentena de Sessões da CLI
  * Substitui scripts Python externos com manifesto e suporte total a rollback.
  */
-function quarentenaSessoesCliNode(dias = 5) {
+function quarentenaSessoesCliNode(dias = 5, confirmar = false) {
   if (!fs.existsSync(CLI_DIR)) return "Diretório da CLI não encontrado.";
 
   const now = Date.now();
@@ -683,6 +782,10 @@ function quarentenaSessoesCliNode(dias = 5) {
     return "Nenhum arquivo órfão com mais de " + dias + " dias para quarentena.";
   }
 
+  if (!confirmar) {
+    return `[DRY-RUN] ${candidates.length} item(ns) com mais de ${dias} dias seriam movidos para quarentena. Nada foi movido. Para mover, repita com --confirmar.`;
+  }
+
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const destDir = path.join(CLI_DIR, `quarentena_${ts}`);
   fs.mkdirSync(destDir, { recursive: true });
@@ -695,6 +798,7 @@ function quarentenaSessoesCliNode(dias = 5) {
   };
 
   let movedCount = 0;
+  const falhas = [];
   for (const c of candidates) {
     try {
       const catDestDir = path.join(destDir, c.category);
@@ -703,72 +807,164 @@ function quarentenaSessoesCliNode(dias = 5) {
       fs.renameSync(c.fullPath, targetPath);
       manifest.itens.push({ origem: c.fullPath, destino: targetPath, categoria: c.category });
       movedCount++;
-    } catch {}
+    } catch (err) {
+      falhas.push({ origem: c.fullPath, erro: err.message });
+    }
   }
+  manifest.falhas = falhas;
 
   fs.writeFileSync(path.join(destDir, "manifesto.json"), JSON.stringify(manifest, null, 2), "utf8");
-  return `Movidos ${movedCount} itens para quarentena reversível em ${destDir}`;
+  const falhasMsg = falhas.map(f => `\n  [ERRO] Nao foi possivel mover ${f.origem}: ${f.erro}`).join("");
+  return `Movidos ${movedCount} de ${candidates.length} itens para quarentena reversível em ${destDir}${falhasMsg}`;
+}
+
+/**
+ * Coleta as pastas do disco referenciadas por um arquivo de projeto da IDE
+ * (ex.: projectResources.resources[].gitFolder.folderUri = "file:///c%3A/...").
+ */
+export function extrairCaminhosProjeto(json) {
+  const caminhos = [];
+  (function walk(o) {
+    if (!o || typeof o !== "object") return;
+    for (const [k, v] of Object.entries(o)) {
+      if (typeof v === "string" && /uri$/i.test(k) && v.startsWith("file://")) {
+        try {
+          caminhos.push(fileURLToPath(v));
+        } catch {
+          caminhos.push(null); // URI ilegível: impossível provar ausência
+        }
+      } else if (v && typeof v === "object") {
+        walk(v);
+      }
+    }
+  })(json);
+  return caminhos;
+}
+
+// "existe" | "ausente" | "indeterminado" — só ENOENT com a raiz (drive) presente prova ausência
+function estadoCaminho(p) {
+  if (!p) return "indeterminado";
+  if (!IS_WINDOWS && /^\/[a-zA-Z]:/.test(p)) return "indeterminado"; // caminho Windows lido fora do Windows
+  try {
+    fs.statSync(p);
+    return "existe";
+  } catch (err) {
+    if (err.code !== "ENOENT" && err.code !== "ENOTDIR") return "indeterminado";
+    try {
+      fs.statSync(path.parse(p).root);
+    } catch {
+      return "indeterminado"; // drive externo/rede desconectado não é prova de órfão
+    }
+    return "ausente";
+  }
+}
+
+/**
+ * Um projeto só é órfão se referencia ao menos uma pasta e TODAS comprovadamente não existem mais.
+ * Na dúvida (JSON ilegível, sem caminho, drive ausente) o projeto é mantido.
+ */
+export function avaliarProjeto(filePath) {
+  const arquivo = path.basename(filePath);
+  if (PROTECTED_PROJECT_FILES.has(arquivo)) return { arquivo, orfao: false, motivo: "protegido" };
+
+  let json;
+  try {
+    json = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (err) {
+    return { arquivo, orfao: false, motivo: `JSON ilegivel, mantido (${err.message})` };
+  }
+
+  const caminhos = extrairCaminhosProjeto(json);
+  if (caminhos.length === 0) return { arquivo, orfao: false, motivo: "nao referencia pasta no disco, mantido" };
+
+  const estados = caminhos.map(estadoCaminho);
+  if (estados.every(e => e === "ausente")) {
+    return { arquivo, orfao: true, motivo: `pasta(s) inexistente(s): ${caminhos.join(", ")}`, caminhos };
+  }
+  return { arquivo, orfao: false, motivo: estados.includes("existe") ? "pasta ainda existe" : "nao foi possivel verificar a pasta, mantido", caminhos };
+}
+
+export function listarProjetosOrfaos(projectsDir = PROJECTS_CONFIG_DIR) {
+  if (!fs.existsSync(projectsDir)) return [];
+  return fs.readdirSync(projectsDir)
+    .filter(f => f.endsWith(".json"))
+    .map(f => avaliarProjeto(path.join(projectsDir, f)))
+    .filter(r => r.orfao);
 }
 
 /**
  * HERMETISMO 100% NODE.JS: Quarentena de Projetos Fantasmas
+ * Sem `confirmar` é apenas um dry-run: lista, mas não move nada.
  */
-function quarentenaProjetosFantasmasNode() {
-  if (!fs.existsSync(PROJECTS_CONFIG_DIR)) return "Diretório de projetos não encontrado.";
+export function quarentenaProjetosFantasmasNode(confirmar = false, { projectsDir = PROJECTS_CONFIG_DIR, arquivoDir = ARQUIVO_DIR, rename = fs.renameSync } = {}) {
+  if (!fs.existsSync(projectsDir)) return { mensagem: "Diretório de projetos não encontrado.", movidos: 0, falhas: [] };
 
-  const ghostFiles = [];
+  let orfaos;
   try {
-    const files = fs.readdirSync(PROJECTS_CONFIG_DIR).filter(f => f.endsWith(".json"));
-    for (const f of files) {
-      if (!PROTECTED_PROJECT_FILES.has(f)) {
-        ghostFiles.push(f);
-      }
-    }
-  } catch {}
+    orfaos = listarProjetosOrfaos(projectsDir);
+  } catch (err) {
+    return { mensagem: `[ERRO] Nao foi possivel ler ${projectsDir}: ${err.message}. Nada foi movido.`, movidos: 0, falhas: [] };
+  }
 
-  if (ghostFiles.length === 0) {
-    return "Nenhum projeto fantasma detectado para isolar.";
+  if (orfaos.length === 0) {
+    return { mensagem: "Nenhum projeto fantasma (pasta inexistente no disco) detectado para isolar.", movidos: 0, falhas: [] };
+  }
+
+  const lista = orfaos.map(o => `\n    * ${o.arquivo} -> ${o.motivo}`).join("");
+  if (!confirmar) {
+    return {
+      mensagem: `[DRY-RUN] ${orfaos.length} projeto(s) orfao(s) seriam isolados:${lista}\n  Nada foi movido. Para mover, repita com --confirmar.`,
+      movidos: 0,
+      falhas: []
+    };
   }
 
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
-  const destDir = path.join(ARQUIVO_DIR, `quarentena_projetos_config_${ts}`);
+  const destDir = path.join(arquivoDir, `quarentena_projetos_config_${ts}`);
   fs.mkdirSync(destDir, { recursive: true });
 
   const manifest = {
     timestamp: ts,
-    total: ghostFiles.length,
-    arquivos: []
+    total: orfaos.length,
+    arquivos: [],
+    falhas: []
   };
 
   let moved = 0;
-  for (const f of ghostFiles) {
+  for (const o of orfaos) {
+    const src = path.join(projectsDir, o.arquivo);
+    const dst = path.join(destDir, o.arquivo);
     try {
-      const src = path.join(PROJECTS_CONFIG_DIR, f);
-      const dst = path.join(destDir, f);
-      fs.renameSync(src, dst);
-      manifest.arquivos.push({ origem: src, destino: dst });
+      rename(src, dst);
+      manifest.arquivos.push({ origem: src, destino: dst, motivo: o.motivo });
       moved++;
-    } catch {}
+    } catch (err) {
+      manifest.falhas.push({ origem: src, erro: err.message });
+    }
   }
 
   fs.writeFileSync(path.join(destDir, "manifesto.json"), JSON.stringify(manifest, null, 2), "utf8");
-  return `Isolados ${moved} projetos fantasmas para ${destDir}`;
+  const falhasMsg = manifest.falhas.map(f => `\n  [ERRO] Nao foi possivel mover ${f.origem}: ${f.erro}`).join("");
+  return { mensagem: `Isolados ${moved} de ${orfaos.length} projetos fantasmas para ${destDir}${falhasMsg}`, movidos: moved, falhas: manifest.falhas };
 }
 
-function limpar(dias = 5) {
+function limpar(dias = 5, confirmar = false) {
   console.log("\n=======================================================");
   console.log("             INICIANDO FAXINA SEGURA (100% NODE.JS)    ");
   console.log("=======================================================");
+  if (!confirmar) {
+    console.log("\n[DRY-RUN] Nada sera movido. Revise a lista e repita com --confirmar para aplicar.");
+  }
 
   // 1. Quarentena segura de sessões CLI (100% Node.js)
   console.log(`\n[Passo 1/3] Movendo sessoes antigas (> ${dias} dias) para quarentena reversivel...`);
-  const resSessoes = quarentenaSessoesCliNode(dias);
+  const resSessoes = quarentenaSessoesCliNode(dias, confirmar);
   console.log(`  ${resSessoes}`);
 
   // 2. Quarentena de projetos fantasmas (100% Node.js)
   console.log(`\n[Passo 2/3] Verificando e isolando projetos fantasmas em ~/.gemini/config/projects...`);
-  const resProjetos = quarentenaProjetosFantasmasNode();
-  console.log(`  ${resProjetos}`);
+  const resProjetos = quarentenaProjetosFantasmasNode(confirmar);
+  console.log(`  ${resProjetos.mensagem}`);
 
   // 3. Alerta de mesas Git
   const mesas = listarMesasGit();
@@ -824,40 +1020,48 @@ function expurgar(confirmarDestruicao = false) {
   console.log(`\nSUCESSO: ${totalFreedMB.toFixed(1)} MB liberados permanentemente no SSD!\n`);
 }
 
-const args = process.argv.slice(2);
-const comando = args[0] || "auditar";
+function main() {
+  const args = process.argv.slice(2);
+  const comando = args[0] || "auditar";
 
-let dias = 5;
-const diasIdx = args.indexOf("--dias");
-if (diasIdx !== -1 && args[diasIdx + 1]) {
-  dias = parseInt(args[diasIdx + 1], 10) || 5;
+  let dias = 5;
+  const diasIdx = args.indexOf("--dias");
+  if (diasIdx !== -1 && args[diasIdx + 1]) {
+    dias = parseInt(args[diasIdx + 1], 10) || 5;
+  }
+
+  const confirmar = args.includes("--confirmar");
+  const liberar = args.includes("--liberar");
+  const incluirCdp = args.includes("--incluir-cdp");
+  const limparConcluidas = args.includes("--limpar-concluidas");
+  const confirmarDestruicao = args.includes("--confirmar-destruicao");
+
+  switch (comando) {
+    case "auditar":
+      auditar();
+      break;
+    case "zumbis":
+      gerenciarZumbis(confirmar);
+      break;
+    case "portas":
+      gerenciarPortas(liberar, incluirCdp);
+      break;
+    case "mesas":
+      gerenciarMesas(limparConcluidas);
+      break;
+    case "limpar":
+      limpar(dias, confirmar);
+      break;
+    case "expurgar":
+      expurgar(confirmarDestruicao);
+      break;
+    default:
+      console.log("Uso: node scripts/vibe-clean.mjs <auditar|zumbis|portas|mesas|limpar|expurgar> [--dias 5] [--confirmar] [--liberar [--incluir-cdp]] [--limpar-concluidas] [--confirmar-destruicao]");
+      process.exit(1);
+  }
 }
 
-const confirmar = args.includes("--confirmar");
-const liberar = args.includes("--liberar");
-const limparConcluidas = args.includes("--limpar-concluidas");
-const confirmarDestruicao = args.includes("--confirmar-destruicao");
-
-switch (comando) {
-  case "auditar":
-    auditar();
-    break;
-  case "zumbis":
-    gerenciarZumbis(confirmar);
-    break;
-  case "portas":
-    gerenciarPortas(liberar);
-    break;
-  case "mesas":
-    gerenciarMesas(limparConcluidas);
-    break;
-  case "limpar":
-    limpar(dias);
-    break;
-  case "expurgar":
-    expurgar(confirmarDestruicao);
-    break;
-  default:
-    console.log("Uso: node scripts/vibe-clean.mjs <auditar|zumbis|portas|mesas|limpar|expurgar> [--dias 5] [--confirmar] [--liberar] [--limpar-concluidas] [--confirmar-destruicao]");
-    process.exit(1);
+// Só executa a CLI quando chamado diretamente (permite importar as funções nos testes sem efeitos colaterais)
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  main();
 }

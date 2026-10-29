@@ -41,7 +41,7 @@ node scripts/vibe-clean.mjs auditar
 ### 2. Caçador de Portas Presas (`portas`)
 Inspeciona ou libera as portas de desenvolvimento (3000, 5173, 8000, 9222):
 ```bash
-node scripts/vibe-clean.mjs portas [--liberar]
+node scripts/vibe-clean.mjs portas [--liberar] [--incluir-cdp]
 ```
 
 ### 3. Liberação Imediata de Memória RAM (`zumbis`)
@@ -59,7 +59,7 @@ node scripts/vibe-clean.mjs mesas [--limpar-concluidas]
 ### 5. Faxina Geral Segura 100% Node.js (`limpar`)
 Executa a higienização completa com proteção de quarentena reversível e manifesto transacional:
 ```bash
-node scripts/vibe-clean.mjs limpar [--dias 5]
+node scripts/vibe-clean.mjs limpar [--dias 5] [--confirmar]
 ```
 
 ### 6. Expurgo Definitivo de Espaço (`expurgar`)

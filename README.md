@@ -57,7 +57,7 @@ node scripts/vibe-clean.mjs auditar
 ### 2. `portas` — Surgical Port Hunter & Unblocker
 Detects hung servers on ports `3000` (Next.js/React), `5173` (Vite), and `8000` (FastAPI/Python), while strictly protecting the user's visual browser on port `9222` (CDP):
 ```bash
-node scripts/vibe-clean.mjs portas [--liberar]
+node scripts/vibe-clean.mjs portas [--liberar] [--incluir-cdp]
 ```
 
 ### 3. `mesas` — Safe Worktree Management
@@ -75,7 +75,7 @@ node scripts/vibe-clean.mjs zumbis --confirmar
 ### 5. `limpar` — 100% Node.js Safe Cleanup with Reversible Quarantine
 Isolates stale AI logs and temporary files older than 5 days into a reversible quarantine directory with full rollback manifest:
 ```bash
-node scripts/vibe-clean.mjs limpar [--dias 5]
+node scripts/vibe-clean.mjs limpar [--dias 5] [--confirmar]
 ```
 
 ### 6. `expurgar` — Permanent SSD Recovery
