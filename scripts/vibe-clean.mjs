@@ -567,6 +567,75 @@ function gerenciarPortas(liberar = false, incluirCdp = false) {
   console.log(`\nSUCESSO: ${freed} porta(s) liberadas!\n`);
 }
 
+function git(repoDir, gitArgs) {
+  return execFileSync("git", ["-C", repoDir, ...gitArgs], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+    timeout: 30000
+  }).trim();
+}
+
+function primeiraLinhaErro(err) {
+  const stderr = err && err.stderr ? String(err.stderr).trim() : "";
+  return (stderr || (err && err.message) || "erro desconhecido").split(/\r?\n/)[0];
+}
+
+/**
+ * Detecta a branch base real do repositório (origin/HEAD, senão origin/main, origin/master,
+ * main, master). Retorna null se nada existir: quem chama deve tratar como NÃO seguro.
+ */
+export function detectarBranchBase(repoDir) {
+  try {
+    const ref = git(repoDir, ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]);
+    if (ref) return ref.replace(/^refs\/remotes\//, "");
+  } catch {}
+  for (const candidata of ["origin/main", "origin/master", "main", "master"]) {
+    try {
+      git(repoDir, ["rev-parse", "--verify", "--quiet", `${candidata}^{commit}`]);
+      return candidata;
+    } catch {}
+  }
+  return null;
+}
+
+/**
+ * Avalia se uma mesa pode ser desmontada. Qualquer erro do git (status ou contagem de commits)
+ * vira `erro` e a mesa é NÃO segura: erro nunca é interpretado como "sem commits".
+ */
+export function analisarMesa(repoDir, mesa, base) {
+  const branch = mesa.branch;
+  const r = { isDirty: false, commitsAhead: null, erro: null, seguro: false };
+
+  try {
+    r.isDirty = git(mesa.caminho, ["status", "--porcelain"]).length > 0;
+  } catch (err) {
+    r.erro = `git status falhou: ${primeiraLinhaErro(err)}`;
+    return r;
+  }
+
+  if (!base) {
+    r.erro = "branch base desconhecida";
+    return r;
+  }
+  if (!branch) {
+    r.erro = "mesa sem branch (HEAD destacado)";
+    return r;
+  }
+
+  try {
+    const count = git(repoDir, ["rev-list", "--count", `${base}..refs/heads/${branch}`]);
+    if (!/^\d+$/.test(count)) throw new Error(`saida inesperada: '${count}'`);
+    r.commitsAhead = parseInt(count, 10);
+  } catch (err) {
+    r.erro = `contagem de commits vs ${base} falhou: ${primeiraLinhaErro(err)}`;
+    return r;
+  }
+
+  r.seguro = !r.isDirty && r.commitsAhead === 0 && branch.startsWith("task/");
+  return r;
+}
+
 function gerenciarMesas(limparConcluidas = false) {
   const mesas = listarMesasGit();
   console.log("\n=======================================================");
@@ -579,27 +648,25 @@ function gerenciarMesas(limparConcluidas = false) {
   }
 
   const concluidasLimpass = [];
+  const base = detectarBranchBase(ROOT_DIR);
+  if (!base) {
+    console.log("[AVISO] Nao foi possivel detectar a branch base do repositorio (origin/HEAD, main ou master).");
+    console.log("        Nenhuma mesa sera considerada segura para desmontar.");
+  } else {
+    console.log(`Branch base de comparacao: ${base}`);
+  }
 
   for (const m of mesas) {
     const nomePasta = path.basename(m.caminho);
     const branch = m.branch || "sem branch";
+    const analise = analisarMesa(ROOT_DIR, m, base);
 
-    // Verificar sujeira
-    let isDirty = false;
-    let commitsAhead = 0;
-    try {
-      const statusRaw = execFileSync("git", ["-C", m.caminho, "status", "--porcelain"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-      isDirty = statusRaw.length > 0;
-
-      // Verificar commits à frente de origin/main
-      const logRaw = execFileSync("git", ["-C", ROOT_DIR, "log", "origin/main.." + branch, "--oneline"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-      commitsAhead = logRaw ? logRaw.split(/\r?\n/).length : 0;
-    } catch {}
-
-    const statusMsg = isDirty ? "⚠️  ARQUIVOS NÃO SALVOS (SUJA)" : (commitsAhead > 0 ? `🔵 ${commitsAhead} COMMITS PENDENTES` : "🟢 PRONTA P/ DESMONTAR (0 COMMITS)");
+    const statusMsg = analise.erro
+      ? `❓ NÃO VERIFICÁVEL (${analise.erro}) -> tratada como NÃO segura`
+      : (analise.isDirty ? "⚠️  ARQUIVOS NÃO SALVOS (SUJA)" : (analise.commitsAhead > 0 ? `🔵 ${analise.commitsAhead} COMMITS PENDENTES` : "🟢 PRONTA P/ DESMONTAR (0 COMMITS)"));
     console.log(`  - ${nomePasta.padEnd(40)} | [${branch}] | ${statusMsg}`);
 
-    if (!isDirty && commitsAhead === 0 && branch.startsWith("task/")) {
+    if (analise.seguro) {
       concluidasLimpass.push(m);
     }
   }
