@@ -216,26 +216,7 @@ function inspecionarPortas(allProcs = null) {
           portasStatus.push({ port, status: "LIVRE", pid: null, name: "-", cmd: "-", isZombie: false, isProtected: false });
         } else {
           for (const m of matches) {
-            const pInfo = pidMap.get(m.OwningProcess) || { Name: "desconhecido", CommandLine: "" };
-            const pName = (pInfo.Name || "").toLowerCase();
-            const pCmd = (pInfo.CommandLine || "").toLowerCase();
-
-            // Guardrail de Proteção: Navegadores visuais (Chrome, Brave, Edge) na 9222 NUNCA são zumbis
-            const isUserBrowser = pName.includes("brave") || pName.includes("chrome") || pName.includes("msedge");
-            const isCdpBrowser = port === 9222 && isUserBrowser;
-
-            // Zumbis típicos: node.exe ou python.exe esquecidos segurando a porta de dev
-            const isZombieDevServer = (pName.includes("node") || pName.includes("python")) && !pCmd.includes("language_server");
-
-            portasStatus.push({
-              port,
-              status: isCdpBrowser ? "OCUPADA (NAVEGADOR PRINCIPAL)" : (isZombieDevServer ? "OCUPADA (SERVIDOR PRESO)" : "OCUPADA"),
-              pid: m.OwningProcess,
-              name: pInfo.Name,
-              cmd: pInfo.CommandLine || "",
-              isZombie: isZombieDevServer,
-              isProtected: isCdpBrowser
-            });
+            portasStatus.push(classificarPorta(port, m.OwningProcess, pidMap));
           }
         }
       }
@@ -245,6 +226,47 @@ function inspecionarPortas(allProcs = null) {
   }
 
   return portasStatus;
+}
+
+/**
+ * Classificação pura (testável) de quem ocupa uma porta de dev.
+ * Só é "servidor preso" um node/python ÓRFÃO de verdade (PID pai inexistente):
+ * um servidor com pai vivo (terminal, npm, IDE) está em uso e nunca é marcado.
+ */
+export function classificarPorta(port, pid, pidMap) {
+  const pInfo = pidMap.get(pid);
+  const pName = ((pInfo && pInfo.Name) || "").toLowerCase();
+  const pCmd = ((pInfo && pInfo.CommandLine) || "").toLowerCase();
+
+  // Guardrail de Proteção: Navegadores visuais (Chrome, Brave, Edge) na 9222 NUNCA são zumbis
+  const isUserBrowser = pName.includes("brave") || pName.includes("chrome") || pName.includes("msedge");
+  const isCdpBrowser = port === 9222 && isUserBrowser;
+
+  // Zumbis típicos: node.exe ou python.exe esquecidos segurando a porta de dev, cujo pai já morreu
+  const isOrphan = !!pInfo && !pidMap.has(pInfo.ParentProcessId);
+  const isZombieDevServer = !isCdpBrowser && isOrphan && (pName.includes("node") || pName.includes("python")) && !pCmd.includes("language_server");
+
+  return {
+    port,
+    status: isCdpBrowser ? "OCUPADA (NAVEGADOR PRINCIPAL)" : (isZombieDevServer ? "OCUPADA (SERVIDOR PRESO)" : "OCUPADA"),
+    pid,
+    name: pInfo ? pInfo.Name : "desconhecido",
+    cmd: (pInfo && pInfo.CommandLine) || "",
+    isZombie: isZombieDevServer,
+    isProtected: isCdpBrowser
+  };
+}
+
+/**
+ * Decide quais portas presas podem ser liberadas. A 9222 (CDP) pode ser uma sessão
+ * de navegador/automação em uso: só entra com a confirmação extra --incluir-cdp.
+ */
+export function selecionarPortasParaLiberar(portas, incluirCdp = false) {
+  const presas = portas.filter(p => p.isZombie && !p.isProtected);
+  return {
+    liberar: presas.filter(p => p.port !== 9222 || incluirCdp),
+    cdpRetidas: presas.filter(p => p.port === 9222 && !incluirCdp)
+  };
 }
 
 function listarMesasGit() {
@@ -489,7 +511,7 @@ function gerenciarZumbis(confirmar = false) {
   console.log(`SUCESSO: ${killed} processos finalizados. ~${procData.zombieRamMB} MB de RAM liberados!\n`);
 }
 
-function gerenciarPortas(liberar = false) {
+function gerenciarPortas(liberar = false, incluirCdp = false) {
   const portas = inspecionarPortas();
   console.log("\n=======================================================");
   console.log("       CAÇADOR DE PORTAS DE DEV (VIBE-CLEAN)           ");
@@ -497,6 +519,7 @@ function gerenciarPortas(liberar = false) {
 
   const presas = portas.filter(p => p.isZombie);
   const protegidas = portas.filter(p => p.isProtected);
+  const { liberar: liberaveis, cdpRetidas } = selecionarPortasParaLiberar(portas, incluirCdp);
 
   for (const p of portas) {
     if (p.status === "LIVRE") {
@@ -521,9 +544,14 @@ function gerenciarPortas(liberar = false) {
     return;
   }
 
-  console.log(`\nLiberando ${presas.length} porta(s) presas...`);
+  for (const p of cdpRetidas) {
+    console.log(`\n[AVISO] Porta :9222 (CDP, PID ${p.pid}) NAO sera liberada: pode ser uma sessao de navegador/automacao em uso.`);
+    console.log("Se tiver certeza, repita com a confirmacao extra: node scripts/vibe-clean.mjs portas --liberar --incluir-cdp");
+  }
+
+  console.log(`\nLiberando ${liberaveis.length} porta(s) presas...`);
   let freed = 0;
-  for (const p of presas) {
+  for (const p of liberaveis) {
     try {
       if (IS_WINDOWS) {
         execSync(`taskkill /F /PID ${p.pid}`, { stdio: "ignore" });
@@ -840,6 +868,7 @@ function main() {
 
   const confirmar = args.includes("--confirmar");
   const liberar = args.includes("--liberar");
+  const incluirCdp = args.includes("--incluir-cdp");
   const limparConcluidas = args.includes("--limpar-concluidas");
   const confirmarDestruicao = args.includes("--confirmar-destruicao");
 
@@ -851,7 +880,7 @@ function main() {
       gerenciarZumbis(confirmar);
       break;
     case "portas":
-      gerenciarPortas(liberar);
+      gerenciarPortas(liberar, incluirCdp);
       break;
     case "mesas":
       gerenciarMesas(limparConcluidas);
@@ -863,7 +892,7 @@ function main() {
       expurgar(confirmarDestruicao);
       break;
     default:
-      console.log("Uso: node scripts/vibe-clean.mjs <auditar|zumbis|portas|mesas|limpar|expurgar> [--dias 5] [--confirmar] [--liberar] [--limpar-concluidas] [--confirmar-destruicao]");
+      console.log("Uso: node scripts/vibe-clean.mjs <auditar|zumbis|portas|mesas|limpar|expurgar> [--dias 5] [--confirmar] [--liberar [--incluir-cdp]] [--limpar-concluidas] [--confirmar-destruicao]");
       process.exit(1);
   }
 }
