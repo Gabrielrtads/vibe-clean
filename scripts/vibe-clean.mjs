@@ -19,7 +19,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { execFileSync, execSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const WORKTREES_DIR = path.join(ROOT_DIR, ".worktrees");
@@ -109,6 +109,25 @@ function findProcesses() {
 
   const psCmd = `Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, CommandLine, WorkingSetSize | ConvertTo-Json -Compress`;
   const all = execPwshJson(psCmd);
+  const { targets, zombies, protectedPids } = classificarProcessos(all, process.pid);
+
+  const zombieRamMB = Math.round(zombies.reduce((acc, p) => acc + (p.WorkingSetSize || 0), 0) / (1024 * 1024));
+
+  return {
+    totalTargetProcesses: targets.length,
+    protectedCount: protectedPids.size,
+    zombies,
+    zombieRamMB,
+    allProcesses: all
+  };
+}
+
+/**
+ * Classificação pura (testável) da tabela de processos do Windows.
+ * Um processo só é zumbi se o PID pai NÃO existe mais na tabela: nunca por
+ * conter uma palavra na linha de comando, pois isso mataria processos com pai vivo.
+ */
+export function classificarProcessos(all, selfPid) {
   const pidMap = new Map(all.map(p => [p.ProcessId, p]));
 
   // 1. Identificar PIDs raiz protegidos de TODOS os agentes e ferramentas do enxame:
@@ -127,6 +146,9 @@ function findProcesses() {
       name.includes("cursor") ||
       name.includes("code.exe") ||
       name.includes("windsurf") ||
+      name === "pwsh.exe" ||
+      name === "powershell.exe" ||
+      name === "wt.exe" ||
       cmd.includes("claude") ||
       cmd.includes("codex") ||
       cmd.includes("language_server")
@@ -152,7 +174,6 @@ function findProcesses() {
 
   for (const p of all) {
     const name = (p.Name || "").toLowerCase();
-    const cmd = (p.CommandLine || "").toLowerCase();
 
     const isTarget = name.includes("node.exe") || name.includes("python.exe") || name.includes("agy.exe") || name.includes("whisper") || name.includes("ffmpeg.exe");
     if (!isTarget) continue;
@@ -163,32 +184,15 @@ function findProcesses() {
     if (protectedPids.has(p.ProcessId)) continue;
 
     // Se for o próprio processo atual do Node, pula
-    if (p.ProcessId === process.pid) continue;
+    if (p.ProcessId === selfPid) continue;
 
-    // Critério de órfão: ParentProcessId não existe mais na tabela de processos ativos do SO
-    const parentExists = pidMap.has(p.ParentProcessId);
-    const isOrphan = !parentExists;
-
-    // Processos associados a scripts descartados de esteira
-    const isDeadScript = cmd.includes("fila_destilacao") || cmd.includes("clean_zombie") || cmd.includes("taskkill");
-
-    if (isOrphan || isDeadScript) {
-      zombies.push({
-        ...p,
-        motivo: isOrphan ? "Processo Pai Inexistente (Órfão)" : "Script de Esteira Finalizado"
-      });
+    // Único critério de órfão: ParentProcessId não existe mais na tabela de processos ativos do SO
+    if (!pidMap.has(p.ParentProcessId)) {
+      zombies.push({ ...p, motivo: "Processo Pai Inexistente (Órfão)" });
     }
   }
 
-  const zombieRamMB = Math.round(zombies.reduce((acc, p) => acc + (p.WorkingSetSize || 0), 0) / (1024 * 1024));
-
-  return {
-    totalTargetProcesses: targets.length,
-    protectedCount: protectedPids.size,
-    zombies,
-    zombieRamMB,
-    allProcesses: all
-  };
+  return { targets, zombies, protectedPids };
 }
 
 /**
@@ -824,40 +828,47 @@ function expurgar(confirmarDestruicao = false) {
   console.log(`\nSUCESSO: ${totalFreedMB.toFixed(1)} MB liberados permanentemente no SSD!\n`);
 }
 
-const args = process.argv.slice(2);
-const comando = args[0] || "auditar";
+function main() {
+  const args = process.argv.slice(2);
+  const comando = args[0] || "auditar";
 
-let dias = 5;
-const diasIdx = args.indexOf("--dias");
-if (diasIdx !== -1 && args[diasIdx + 1]) {
-  dias = parseInt(args[diasIdx + 1], 10) || 5;
+  let dias = 5;
+  const diasIdx = args.indexOf("--dias");
+  if (diasIdx !== -1 && args[diasIdx + 1]) {
+    dias = parseInt(args[diasIdx + 1], 10) || 5;
+  }
+
+  const confirmar = args.includes("--confirmar");
+  const liberar = args.includes("--liberar");
+  const limparConcluidas = args.includes("--limpar-concluidas");
+  const confirmarDestruicao = args.includes("--confirmar-destruicao");
+
+  switch (comando) {
+    case "auditar":
+      auditar();
+      break;
+    case "zumbis":
+      gerenciarZumbis(confirmar);
+      break;
+    case "portas":
+      gerenciarPortas(liberar);
+      break;
+    case "mesas":
+      gerenciarMesas(limparConcluidas);
+      break;
+    case "limpar":
+      limpar(dias);
+      break;
+    case "expurgar":
+      expurgar(confirmarDestruicao);
+      break;
+    default:
+      console.log("Uso: node scripts/vibe-clean.mjs <auditar|zumbis|portas|mesas|limpar|expurgar> [--dias 5] [--confirmar] [--liberar] [--limpar-concluidas] [--confirmar-destruicao]");
+      process.exit(1);
+  }
 }
 
-const confirmar = args.includes("--confirmar");
-const liberar = args.includes("--liberar");
-const limparConcluidas = args.includes("--limpar-concluidas");
-const confirmarDestruicao = args.includes("--confirmar-destruicao");
-
-switch (comando) {
-  case "auditar":
-    auditar();
-    break;
-  case "zumbis":
-    gerenciarZumbis(confirmar);
-    break;
-  case "portas":
-    gerenciarPortas(liberar);
-    break;
-  case "mesas":
-    gerenciarMesas(limparConcluidas);
-    break;
-  case "limpar":
-    limpar(dias);
-    break;
-  case "expurgar":
-    expurgar(confirmarDestruicao);
-    break;
-  default:
-    console.log("Uso: node scripts/vibe-clean.mjs <auditar|zumbis|portas|mesas|limpar|expurgar> [--dias 5] [--confirmar] [--liberar] [--limpar-concluidas] [--confirmar-destruicao]");
-    process.exit(1);
+// Só executa a CLI quando chamado diretamente (permite importar as funções nos testes sem efeitos colaterais)
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  main();
 }
